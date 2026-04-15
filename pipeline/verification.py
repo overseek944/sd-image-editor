@@ -95,7 +95,7 @@ def load_clip_model(
     from transformers import CLIPModel, CLIPProcessor
 
     logger.info(f"Loading CLIP model '{model_id}' …")
-    model = CLIPModel.from_pretrained(model_id)
+    model = CLIPModel.from_pretrained(model_id, use_safetensors=True)
     processor = CLIPProcessor.from_pretrained(model_id)
     model.to(device)
     model.eval()
