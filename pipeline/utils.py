@@ -21,6 +21,7 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    logger.propagate = False  # prevent duplicate output from parent loggers
     return logger
 
 
