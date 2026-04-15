@@ -1,0 +1,33 @@
+# Core ML
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Diffusers ecosystem
+diffusers>=0.27.0
+transformers>=4.38.0
+accelerate>=0.27.0
+safetensors>=0.4.0
+
+# SAM — install from source:
+# pip install git+https://github.com/facebookresearch/segment-anything.git
+# Listed here for documentation purposes:
+# segment-anything
+
+# Computer vision
+opencv-python>=4.9.0
+Pillow>=10.2.0
+scikit-image>=0.22.0
+
+# Face recognition
+insightface>=0.7.3
+onnxruntime>=1.17.0
+# For GPU: onnxruntime-gpu>=1.17.0
+
+# Numerics
+numpy>=1.26.0
+
+# ControlNet auxiliary (Canny is handled via opencv, but useful for other preprocessors)
+controlnet-aux>=0.0.7
+
+# Config / logging
+PyYAML>=6.0

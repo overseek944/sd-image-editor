@@ -1,0 +1,45 @@
+# sd-image-editor — default configuration
+# Override any value by passing kwargs directly to run_pipeline().
+
+# ── SAM ──────────────────────────────────────────────────────────────────────
+sam:
+  checkpoint: "checkpoints/sam_vit_h_4b8939.pth"
+  model_type: "vit_h"           # vit_h | vit_l | vit_b
+
+# ── Mask post-processing ──────────────────────────────────────────────────────
+mask:
+  dilation_kernel_size: 15
+  dilation_iterations: 2
+  blur_kernel_size: 21
+
+# ── Diffusion ─────────────────────────────────────────────────────────────────
+diffusion:
+  use_controlnet: true
+  inpaint_model_id: "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+  controlnet_model_id: "diffusers/controlnet-canny-sdxl-1.0"
+  base_model_id: "stabilityai/stable-diffusion-xl-base-1.0"
+  strength: 0.4                 # 0.2–0.5 recommended
+  guidance_scale: 7.5
+  num_inference_steps: 30
+  controlnet_conditioning_scale: 0.8
+  canny_low: 100
+  canny_high: 200
+  negative_prompt: >
+    blurry, distorted, low quality, artifacts, bad anatomy,
+    extra limbs, cloned face, disfigured, deformed
+
+# ── Verification ──────────────────────────────────────────────────────────────
+verification:
+  face_similarity_threshold: 0.85   # cosine similarity; None = no face check
+  background_ssim_threshold: 0.80
+  load_clip: true
+  clip_model_id: "openai/clip-vit-base-patch32"
+
+# ── Retry ─────────────────────────────────────────────────────────────────────
+retry:
+  max_attempts: 3
+
+# ── I/O ───────────────────────────────────────────────────────────────────────
+output:
+  result_path: "output/result.png"
+  log_path: "output/run_log.json"
