@@ -112,9 +112,13 @@ def get_clip_embedding(
     """Return a normalised CLIP image embedding."""
     import torch
 
-    inputs = processor(images=image, return_tensors="pt").to(device)
+    # Pass only pixel_values to avoid unexpected kwargs that can cause
+    # get_image_features to return a BaseModelOutputWithPooling instead of a tensor.
+    pixel_values = processor(images=image, return_tensors="pt")["pixel_values"].to(device)
     with torch.no_grad():
-        features = model.get_image_features(**inputs)
+        out = model.get_image_features(pixel_values=pixel_values)
+    # Newer transformers versions may wrap the result in a dataclass
+    features: torch.Tensor = out if isinstance(out, torch.Tensor) else out.pooler_output
     features = features / features.norm(dim=-1, keepdim=True)
     return features.cpu().numpy()[0]
 
