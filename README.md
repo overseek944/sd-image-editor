@@ -49,16 +49,45 @@ Input image + Text prompt
 
 ## Setup
 
-### 1. Install dependencies
+> **Apple Silicon (M1/M2/M3) users:** PyTorch requires a native arm64 conda
+> environment and Python ≤ 3.12. Follow the steps below exactly — do **not**
+> use the conda `base` environment or Python 3.13.
+
+### 1. Create a native arm64 conda environment
+
+```bash
+# Create a fresh arm64 environment with Python 3.11
+CONDA_SUBDIR=osx-arm64 conda create -n sd-editor python=3.11 -y
+conda activate sd-editor
+conda config --env --set subdir osx-arm64   # pin this env to arm64 permanently
+```
+
+### 2. Install PyTorch (via conda)
+
+```bash
+conda install pytorch torchvision -c pytorch -y
+```
+
+Verify MPS (Apple GPU) is available:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.backends.mps.is_available())"
+# Expected: 2.x.x True
+```
+
+### 3. Install remaining dependencies
 
 ```bash
 pip install -r requirements.txt
+```
 
-# SAM must be installed from source:
+### 4. Install SAM from source
+
+```bash
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
 
-### 2. Download the SAM checkpoint
+### 6. Download the SAM checkpoint
 
 ```bash
 mkdir -p checkpoints
