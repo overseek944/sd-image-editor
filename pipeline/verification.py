@@ -166,6 +166,7 @@ def evaluate_similarity(
             "face_similarity"           – cosine sim of face embeddings (or None)
             "background_ssim"           – SSIM over the background region
             "background_clip_similarity"– CLIP cosine sim of background crops (or None)
+            "edit_region_ssim"          – SSIM inside the mask (lower = more changed)
     """
     results: Dict[str, Optional[float]] = {}
 
@@ -179,18 +180,27 @@ def evaluate_similarity(
         results["face_similarity"] = None
         logger.info("Face similarity: N/A (face not detected in one or both images)")
 
-    # --- Background region extraction ---
+    # --- Region extraction ---
     orig_arr = np.array(original.convert("RGB"))
     edit_arr = np.array(edited.convert("RGB").resize(original.size, Image.LANCZOS))
 
-    # Invert mask: background = low-mask areas
-    inv_alpha = 1.0 - (mask.astype(np.float32) / 255.0)
-    if inv_alpha.ndim == 2:
+    edit_alpha = mask.astype(np.float32) / 255.0  # 1.0 inside edited region
+    inv_alpha = 1.0 - edit_alpha                  # 1.0 in background
+    if edit_alpha.ndim == 2:
+        edit_alpha = edit_alpha[:, :, np.newaxis]
         inv_alpha = inv_alpha[:, :, np.newaxis]
 
-    # Zero-out edited region so SSIM focuses only on background
+    # Zero-out the opposite region for each crop so SSIM is region-focused
     orig_bg = (orig_arr * inv_alpha).astype(np.uint8)
     edit_bg = (edit_arr * inv_alpha).astype(np.uint8)
+    orig_fg = (orig_arr * edit_alpha).astype(np.uint8)
+    edit_fg = (edit_arr * edit_alpha).astype(np.uint8)
+
+    # --- Edit-region SSIM (lower = more changed — what we WANT for edits) ---
+    results["edit_region_ssim"] = compute_ssim(
+        Image.fromarray(orig_fg), Image.fromarray(edit_fg)
+    )
+    logger.info(f"Edit-region SSIM: {results['edit_region_ssim']:.4f} (lower = more changed)")
 
     # --- Background SSIM ---
     results["background_ssim"] = compute_ssim(

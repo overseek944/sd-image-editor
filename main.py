@@ -105,12 +105,18 @@ def retry_logic(
     negative_prompt: str,
     face_threshold: float,
     bg_ssim_threshold: float,
+    min_edit_threshold: float,
     max_attempts: int,
     load_clip: bool,
     clip_device: str,
 ) -> Tuple[Optional[Image.Image], Dict, List[Dict]]:
-    """Attempt inpainting up to `max_attempts` times, returning the first
-    result that passes both face-similarity and background-SSIM checks.
+    """Attempt inpainting up to `max_attempts` times, returning the first result
+    that passes face-similarity, background-SSIM, AND minimum edit checks.
+
+    Adaptive escalation: if the edit region is too similar to the original
+    (edit_region_ssim > 1 - min_edit_threshold), strength is increased by 0.1
+    and ControlNet scale is reduced by 0.1 on the next attempt to give the
+    model more creative freedom.
 
     Returns:
         (accepted_image_or_None, last_scores, all_attempt_logs)
@@ -119,9 +125,15 @@ def retry_logic(
     best_result: Optional[Image.Image] = None
     best_scores: Dict = {}
 
+    current_strength = strength
+    current_cn_scale = controlnet_conditioning_scale
+
     for attempt in range(1, max_attempts + 1):
         seed = attempt * 137  # deterministic but different each attempt
-        logger.info(f"--- Attempt {attempt}/{max_attempts} (seed={seed}) ---")
+        logger.info(
+            f"--- Attempt {attempt}/{max_attempts} "
+            f"(seed={seed}, strength={current_strength:.2f}, cn_scale={current_cn_scale:.2f}) ---"
+        )
 
         # --- Generate ---
         if use_controlnet and _ModelCache.controlnet_pipe is not None:
@@ -132,9 +144,9 @@ def retry_logic(
                 canny_image=canny_image,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                strength=strength,
+                strength=current_strength,
                 guidance_scale=guidance_scale,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                controlnet_conditioning_scale=current_cn_scale,
                 num_inference_steps=num_inference_steps,
                 seed=seed,
             )
@@ -145,7 +157,7 @@ def retry_logic(
                 mask=mask_processed,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                strength=strength,
+                strength=current_strength,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
                 seed=seed,
@@ -168,24 +180,42 @@ def retry_logic(
         # --- Decision ---
         face_sim = scores.get("face_similarity")
         bg_ssim = scores.get("background_ssim", 1.0)
+        edit_ssim = scores.get("edit_region_ssim", 0.0)
 
         face_ok = face_sim is None or face_sim >= face_threshold
         bg_ok = bg_ssim >= bg_ssim_threshold
+        # edit_ok: the masked region must differ from the original by at least min_edit_threshold
+        edit_ok = edit_ssim <= (1.0 - min_edit_threshold)
 
-        log_entry = {"attempt": attempt, "seed": seed, "scores": scores, "accepted": face_ok and bg_ok}
+        log_entry = {
+            "attempt": attempt,
+            "seed": seed,
+            "strength": current_strength,
+            "cn_scale": current_cn_scale,
+            "scores": scores,
+            "accepted": face_ok and bg_ok and edit_ok,
+        }
         attempt_logs.append(log_entry)
 
-        if face_ok and bg_ok:
+        if face_ok and bg_ok and edit_ok:
             logger.info(
-                f"Attempt {attempt} ACCEPTED — face_sim={face_sim}, bg_ssim={bg_ssim:.4f}"
+                f"Attempt {attempt} ACCEPTED — face_sim={face_sim}, "
+                f"bg_ssim={bg_ssim:.4f}, edit_ssim={edit_ssim:.4f}"
             )
             return blended, scores, attempt_logs
 
         reasons = []
         if not face_ok:
-            reasons.append(f"face_sim={face_sim:.4f} < threshold={face_threshold}")
+            reasons.append(f"face_sim={face_sim:.4f} < {face_threshold}")
         if not bg_ok:
-            reasons.append(f"bg_ssim={bg_ssim:.4f} < threshold={bg_ssim_threshold}")
+            reasons.append(f"bg_ssim={bg_ssim:.4f} < {bg_ssim_threshold}")
+        if not edit_ok:
+            reasons.append(
+                f"edit_ssim={edit_ssim:.4f} too high (edit barely happened) — escalating"
+            )
+            # Adaptive escalation: more noise, looser ControlNet
+            current_strength = min(0.75, current_strength + 0.1)
+            current_cn_scale = max(0.2, current_cn_scale - 0.1)
         logger.warning(f"Attempt {attempt} REJECTED — {'; '.join(reasons)}")
 
         best_result = blended
@@ -225,10 +255,10 @@ def run_pipeline(
     use_controlnet: bool = True,
     controlnet_model_id: str = "diffusers/controlnet-canny-sdxl-1.0",
     base_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0",
-    strength: float = 0.4,
-    guidance_scale: float = 7.5,
+    strength: float = 0.6,
+    guidance_scale: float = 9.0,
     num_inference_steps: int = 30,
-    controlnet_conditioning_scale: float = 0.8,
+    controlnet_conditioning_scale: float = 0.5,
     canny_low: int = 100,
     canny_high: int = 200,
     negative_prompt: str = (
@@ -238,6 +268,7 @@ def run_pipeline(
     # --- Verification ---
     face_similarity_threshold: float = 0.85,
     background_ssim_threshold: float = 0.80,
+    min_edit_threshold: float = 0.05,   # edit-region SSIM must drop by at least this much
     face_providers: Optional[List[str]] = None,
     load_clip: bool = True,
     clip_model_id: str = "openai/clip-vit-base-patch32",
@@ -366,6 +397,7 @@ def run_pipeline(
         negative_prompt=negative_prompt,
         face_threshold=face_similarity_threshold,
         bg_ssim_threshold=background_ssim_threshold,
+        min_edit_threshold=min_edit_threshold,
         max_attempts=max_attempts,
         load_clip=load_clip,
         clip_device=clip_device,
@@ -391,6 +423,7 @@ def run_pipeline(
         "num_inference_steps": num_inference_steps,
         "face_similarity_threshold": face_similarity_threshold,
         "background_ssim_threshold": background_ssim_threshold,
+        "min_edit_threshold": min_edit_threshold,
         "scores": final_scores,
         "attempt_logs": attempt_logs,
         "accepted": accepted,

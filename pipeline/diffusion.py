@@ -83,7 +83,7 @@ def run_inpainting(
     Returns:
         Generated PIL image at the same size as the input.
     """
-    strength = max(0.2, min(0.5, strength))  # clamp to safe range
+    strength = max(0.2, min(0.75, strength))  # allow up to 0.75 for visible edits
 
     orig_size = image.size  # (W, H)
     if target_size is None:

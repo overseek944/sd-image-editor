@@ -107,9 +107,11 @@ def apply_controlnet(
         canny_image: Canny edge map as RGB PIL image.
         prompt: Target description.
         negative_prompt: Things to avoid.
-        strength: Denoising strength (clamped to 0.2–0.5).
+        strength: Denoising strength (clamped to 0.2–0.75). Higher values
+            produce more visible edits; 0.5–0.7 is a good range for hair/style.
         guidance_scale: CFG scale.
         controlnet_conditioning_scale: How strongly ControlNet guides generation.
+            Lower values (0.3–0.5) give the model more creative freedom.
         num_inference_steps: Number of denoising steps.
         seed: RNG seed.
         target_size: (W, H) to resize inputs; defaults to image size.
@@ -117,7 +119,7 @@ def apply_controlnet(
     Returns:
         Generated PIL image at original resolution.
     """
-    strength = max(0.2, min(0.5, strength))
+    strength = max(0.2, min(0.75, strength))  # allow up to 0.75 for visible edits
     orig_size = image.size
 
     if target_size is None:
