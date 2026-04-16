@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from pipeline.compositing import blend_images
+from pipeline.compositing import blend_images, crop_for_inpaint, paste_inpaint_result
 from pipeline.controlnet import apply_controlnet, extract_canny_edges, load_controlnet_pipeline
 from pipeline.diffusion import load_inpaint_pipeline, run_inpainting
 from pipeline.segmentation import generate_mask, load_sam_model, process_mask
@@ -109,14 +109,19 @@ def retry_logic(
     max_attempts: int,
     load_clip: bool,
     clip_device: str,
+    use_crop_inpaint: bool = True,
 ) -> Tuple[Optional[Image.Image], Dict, List[Dict]]:
     """Attempt inpainting up to `max_attempts` times, returning the first result
     that passes face-similarity, background-SSIM, AND minimum edit checks.
 
+    When use_crop_inpaint=True (default), the mask bounding box is cropped and
+    upscaled to SDXL native resolution before each diffusion call. This removes
+    "context anchoring" — the model no longer sees the original hair in its
+    attention field and is free to generate genuinely different content.
+
     Adaptive escalation: if the edit region is too similar to the original
     (edit_region_ssim > 1 - min_edit_threshold), strength is increased by 0.1
-    and ControlNet scale is reduced by 0.1 on the next attempt to give the
-    model more creative freedom.
+    and ControlNet scale is reduced by 0.1 on the next attempt.
 
     Returns:
         (accepted_image_or_None, last_scores, all_attempt_logs)
@@ -135,13 +140,34 @@ def retry_logic(
             f"(seed={seed}, strength={current_strength:.2f}, cn_scale={current_cn_scale:.2f}) ---"
         )
 
+        # --- Crop (optional) ---
+        if use_crop_inpaint:
+            diff_image, diff_mask, crop_meta = crop_for_inpaint(
+                image=original,
+                mask=mask_processed,
+                padding_fraction=0.20,
+                target_size=(1024, 1024),
+            )
+            # Also crop the canny map to match the image crop
+            diff_canny: Optional[Image.Image] = None
+            if canny_image is not None and crop_meta.get("cropped"):
+                x0, y0, x1, y1 = crop_meta["bbox"]
+                diff_canny = canny_image.crop((x0, y0, x1, y1)).resize(
+                    (1024, 1024), Image.LANCZOS
+                )
+            elif canny_image is not None:
+                diff_canny = canny_image
+        else:
+            diff_image, diff_mask, crop_meta = original, mask_processed, None
+            diff_canny = canny_image
+
         # --- Generate ---
         if use_controlnet and _ModelCache.controlnet_pipe is not None:
             generated = apply_controlnet(
                 pipe=_ModelCache.controlnet_pipe,
-                image=original,
-                mask=mask_processed,
-                canny_image=canny_image,
+                image=diff_image,
+                mask=diff_mask,
+                canny_image=diff_canny if diff_canny is not None else extract_canny_edges(diff_image),
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 strength=current_strength,
@@ -153,8 +179,8 @@ def retry_logic(
         else:
             generated = run_inpainting(
                 pipe=_ModelCache.inpaint_pipe,
-                image=original,
-                mask=mask_processed,
+                image=diff_image,
+                mask=diff_mask,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 strength=current_strength,
@@ -163,7 +189,11 @@ def retry_logic(
                 seed=seed,
             )
 
-        # --- Composite ---
+        # --- Paste crop back into full image (if cropped) ---
+        if use_crop_inpaint and crop_meta is not None:
+            generated = paste_inpaint_result(original, generated, crop_meta)
+
+        # --- Composite (soft mask blend) ---
         blended = blend_images(original, generated, mask_processed)
 
         # --- Evaluate ---
@@ -273,6 +303,8 @@ def run_pipeline(
     load_clip: bool = True,
     clip_model_id: str = "openai/clip-vit-base-patch32",
     clip_device: str = "cpu",
+    # --- Crop-and-inpaint ---
+    use_crop_inpaint: bool = True,
     # --- Retry ---
     max_attempts: int = 3,
     # --- Device ---
@@ -401,6 +433,7 @@ def run_pipeline(
         max_attempts=max_attempts,
         load_clip=load_clip,
         clip_device=clip_device,
+        use_crop_inpaint=use_crop_inpaint,
     )
 
     # 7. Save output
@@ -470,8 +503,11 @@ def _parse_args():
 
     # Diffusion
     p.add_argument("--no-controlnet", action="store_true")
-    p.add_argument("--strength", type=float, default=0.4)
-    p.add_argument("--guidance-scale", type=float, default=7.5)
+    p.add_argument("--no-crop-inpaint", action="store_true",
+                   help="Disable crop-and-inpaint (pass full image to diffusion).")
+    p.add_argument("--strength", type=float, default=None,
+                   help="Denoising strength. Defaults: 0.6 with ControlNet, 0.85 without.")
+    p.add_argument("--guidance-scale", type=float, default=9.0)
     p.add_argument("--steps", type=int, default=30)
 
     # Verification
@@ -489,6 +525,10 @@ def _parse_args():
 if __name__ == "__main__":
     args = _parse_args()
 
+    use_controlnet = not args.no_controlnet
+    # Default strength: 0.85 for the dedicated inpaint model; 0.6 with ControlNet
+    strength = args.strength if args.strength is not None else (0.85 if not use_controlnet else 0.6)
+
     result = run_pipeline(
         image_path=args.image,
         prompt=args.prompt,
@@ -500,14 +540,15 @@ if __name__ == "__main__":
         box=args.box,
         auto_select=args.auto_select,
         auto_mask_index=args.auto_mask_index,
-        use_controlnet=not args.no_controlnet,
-        strength=args.strength,
+        use_controlnet=use_controlnet,
+        strength=strength,
         guidance_scale=args.guidance_scale,
         num_inference_steps=args.steps,
         face_similarity_threshold=args.face_threshold,
         background_ssim_threshold=args.bg_ssim_threshold,
         max_attempts=args.max_attempts,
         load_clip=not args.no_clip,
+        use_crop_inpaint=not args.no_crop_inpaint,
         device=args.device,
     )
 

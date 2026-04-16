@@ -1,6 +1,6 @@
 """sd-image-editor pipeline package."""
 
-from .compositing import blend_images
+from .compositing import blend_images, crop_for_inpaint, paste_inpaint_result
 from .controlnet import apply_controlnet, extract_canny_edges, load_controlnet_pipeline
 from .diffusion import load_inpaint_pipeline, run_inpainting
 from .segmentation import generate_mask, load_sam_model, process_mask
@@ -24,6 +24,8 @@ __all__ = [
     "apply_controlnet",
     "extract_canny_edges",
     "blend_images",
+    "crop_for_inpaint",
+    "paste_inpaint_result",
     "load_face_analyzer",
     "load_clip_model",
     "evaluate_similarity",
