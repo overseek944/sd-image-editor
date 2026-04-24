@@ -332,6 +332,8 @@ def run_pipeline(
     gdino_device: str = "cpu",
     grounded_box_threshold: float = 0.3,
     grounded_text_threshold: float = 0.25,
+    # --- Painted region constraint ---
+    constraint_mask: Optional[np.ndarray] = None,
     # --- Device ---
     device: Optional[str] = None,
 ) -> Dict:
@@ -414,6 +416,15 @@ def run_pipeline(
     )
 
     # 3. Generate mask
+    # If a painted constraint is provided and no explicit SAM prompt, derive
+    # the click point from the centroid of the painted region.
+    if constraint_mask is not None and point_coords is None and box is None and not auto_select and grounded_text is None:
+        ys, xs = np.where(constraint_mask > 0)
+        if len(xs) > 0:
+            cx, cy = int(xs.mean()), int(ys.mean())
+            point_coords = [(cx, cy)]
+            logger.info(f"Derived SAM prompt from constraint mask centroid: ({cx}, {cy})")
+
     if grounded_text is not None:
         logger.info(f"[3/7] Generating Grounded-SAM mask for '{grounded_text}' …")
         raw_mask = generate_grounded_mask(
@@ -437,6 +448,18 @@ def run_pipeline(
             auto_select=auto_select,
             auto_index=auto_mask_index,
         )
+
+    # Clip SAM mask to user-painted region (if provided)
+    if constraint_mask is not None:
+        c = constraint_mask
+        if c.shape != raw_mask.shape:
+            c = np.array(
+                Image.fromarray(c).resize(
+                    (raw_mask.shape[1], raw_mask.shape[0]), Image.NEAREST
+                )
+            )
+        raw_mask = np.minimum(raw_mask, c)
+        logger.info("Constraint mask applied (SAM mask clipped to painted region)")
 
     # 4. Process mask
     logger.info("[4/7] Processing mask (dilation + blur) …")

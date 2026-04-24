@@ -1,7 +1,6 @@
 """Gradio web UI for sd-image-editor.
 
 Usage:
-    pip install gradio
     python app.py
     # Open http://localhost:7860
 """
@@ -9,7 +8,8 @@ Usage:
 from pathlib import Path
 
 import gradio as gr
-from PIL import Image, ImageDraw
+import numpy as np
+from PIL import Image
 
 from main import run_pipeline
 
@@ -22,30 +22,28 @@ INPUT_PATH  = str(OUTPUT_DIR / "ui_input.png")
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-DOT_RADIUS = 8
-DOT_COLOR  = (255, 50, 50)
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def annotate_image(image: Image.Image, x: int, y: int) -> Image.Image:
-    """Return a copy of image with a red dot at (x, y)."""
-    out = image.copy()
-    draw = ImageDraw.Draw(out)
-    r = DOT_RADIUS
-    # White border for visibility on any background
-    draw.ellipse([x - r - 2, y - r - 2, x + r + 2, y + r + 2], fill=(255, 255, 255))
-    draw.ellipse([x - r, y - r, x + r, y + r], fill=DOT_COLOR)
-    return out
+def extract_background_and_mask(editor_value):
+    """Return (background PIL image, constraint mask ndarray) from ImageEditor value."""
+    if editor_value is None:
+        return None, None
+    background = editor_value.get("background")
+    layers = editor_value.get("layers", [])
+    if not layers:
+        return background, None
+    layer_rgba = np.array(layers[0].convert("RGBA"))
+    alpha = layer_rgba[:, :, 3]
+    constraint = (alpha > 10).astype(np.uint8) * 255
+    if constraint.max() == 0:
+        return background, None
+    return background, constraint
 
 
 def format_scores(scores: dict, accepted: bool, elapsed: float) -> str:
-    """Return a Markdown quality report."""
     status = "ACCEPTED" if accepted else "BEST RESULT (thresholds not fully met)"
-    lines = [
-        f"### {status}",
-        f"**Time:** {elapsed:.1f}s",
-    ]
+    lines = [f"### {status}", f"**Time:** {elapsed:.1f}s"]
 
     face = scores.get("face_similarity")
     if face is not None:
@@ -69,26 +67,19 @@ def format_scores(scores: dict, accepted: bool, elapsed: float) -> str:
     return "\n\n".join(lines)
 
 
-# ── Pipeline runner (generator so Gradio shows progress) ─────────────────────
+# ── Pipeline runner ───────────────────────────────────────────────────────────
 
-def run_edit(
-    original_image,
-    point_x,
-    point_y,
-    prompt,
-    num_steps,
-    strength,
-    guidance_scale,
-    controlnet_scale,
-    max_attempts,
-):
-    """Generator that yields (result_image, scores_md, generate_btn) tuples."""
+def run_edit(editor_value, prompt, num_steps, strength, guidance_scale,
+             controlnet_scale, max_attempts):
+    """Generator yielding (result_image, scores_md, generate_btn) tuples."""
 
     errors = []
-    if original_image is None:
+    background, constraint_mask = extract_background_and_mask(editor_value)
+
+    if background is None:
         errors.append("Upload an image first.")
-    if point_x is None or point_y is None:
-        errors.append("Click the lower image to select the region you want to edit.")
+    if constraint_mask is None:
+        errors.append("Paint the region you want to edit before generating.")
     if not prompt or not prompt.strip():
         errors.append("Enter an edit prompt.")
 
@@ -97,11 +88,11 @@ def run_edit(
         yield None, msg, gr.Button(value="Generate", interactive=True)
         return
 
-    original_image.save(INPUT_PATH)
+    background.save(INPUT_PATH)
 
     yield (
         None,
-        "Running pipeline… this typically takes **2–8 minutes** on MPS.",
+        "Running pipeline…",
         gr.Button(value="Running…", interactive=False),
     )
 
@@ -109,7 +100,7 @@ def run_edit(
         result = run_pipeline(
             image_path=INPUT_PATH,
             prompt=prompt.strip(),
-            point_coords=[(int(point_x), int(point_y))],
+            constraint_mask=constraint_mask,
             output_path=RESULT_PATH,
             log_path=LOG_PATH,
             num_inference_steps=int(num_steps),
@@ -124,65 +115,42 @@ def run_edit(
 
     result_pil = Image.open(result["output_path"]).convert("RGB") if result.get("output_path") else None
     scores_text = format_scores(result["scores"], result["accepted"], result["elapsed_seconds"])
-
     yield result_pil, scores_text, gr.Button(value="Generate", interactive=True)
 
 
 # ── UI layout ─────────────────────────────────────────────────────────────────
 
-def on_image_load(image):
-    if image is None:
-        return None, None, None, "_No image loaded._"
-    return image.copy(), None, None, "_Click the image above to select a region._"
-
-
-def on_click(original_image, evt: gr.SelectData):
-    if original_image is None:
-        return None, None, None, "_Upload an image first._"
-    x, y = int(evt.index[0]), int(evt.index[1])
-    return annotate_image(original_image, x, y), x, y, f"Selected point: ({x}, {y})"
-
-
 with gr.Blocks(title="SD Image Editor") as demo:
-
-    # Hidden state
-    original_image_state = gr.State(None)
-    point_x_state        = gr.State(None)
-    point_y_state        = gr.State(None)
 
     gr.Markdown(
         "# SD Image Editor\n"
-        "Upload a portrait, **click the region** you want to change, "
-        "describe the edit, then hit **Generate**."
+        "**1.** Upload a portrait — **2.** Paint over the region you want to change "
+        "(use the brush tool) — **3.** Describe the edit — **4.** Hit **Generate**."
     )
 
     with gr.Row(equal_height=False):
 
-        # ── Left column: image input ──────────────────────────────────────────
-        with gr.Column(scale=1, min_width=420):
-            gr.Markdown("### 1 · Upload image")
-            upload_image = gr.Image(
+        # ── Left column: image editor ─────────────────────────────────────────
+        with gr.Column(scale=1, min_width=460):
+            gr.Markdown("### Upload & paint the region to edit")
+            editor = gr.ImageEditor(
                 type="pil",
-                label="Upload",
-                height=360,
+                brush=gr.Brush(colors=["#ff3300"], default_size=25, color_mode="fixed"),
+                label="Upload image, then paint the region",
+                height=460,
                 show_label=False,
             )
-            gr.Markdown("### 2 · Click the region to edit")
-            display_image = gr.Image(
-                type="pil",
-                label="Click to select region",
-                interactive=False,
-                height=360,
-                buttons=[],
+            gr.Markdown(
+                "_Select the **brush** tool (pencil icon), then paint over the area "
+                "you want to change. You can adjust brush size with the slider._"
             )
-            click_info = gr.Markdown("_No point selected yet._")
 
-        # ── Right column: controls + output ───────────────────────────────────
+        # ── Right column: controls + output ──────────────────────────────────
         with gr.Column(scale=1, min_width=420):
-            gr.Markdown("### 3 · Describe the edit")
+            gr.Markdown("### Describe the edit")
             prompt_box = gr.Textbox(
                 label="Edit prompt",
-                placeholder='"make hair curly"  /  "add beard"  /  "change hair color to red"',
+                placeholder='"make hair curly"  /  "change skin tone to darker"  /  "add beard"',
                 lines=2,
             )
 
@@ -220,34 +188,10 @@ with gr.Blocks(title="SD Image Editor") as demo:
             )
             scores_md = gr.Markdown("_Run the pipeline to see quality scores._")
 
-    # ── Event wiring ──────────────────────────────────────────────────────────
-
-    # When a new image is uploaded (or changed), populate display and reset state
-    for event in (upload_image.upload, upload_image.change):
-        event(
-            fn=on_image_load,
-            inputs=[upload_image],
-            outputs=[display_image, point_x_state, point_y_state, click_info],
-        ).then(
-            fn=lambda img: img,
-            inputs=[upload_image],
-            outputs=[original_image_state],
-        )
-
-    # When user clicks on the display image, mark the point
-    display_image.select(
-        fn=on_click,
-        inputs=[original_image_state],
-        outputs=[display_image, point_x_state, point_y_state, click_info],
-    )
-
-    # Generate button
     generate_btn.click(
         fn=run_edit,
         inputs=[
-            original_image_state,
-            point_x_state,
-            point_y_state,
+            editor,
             prompt_box,
             steps_slider,
             strength_slider,
