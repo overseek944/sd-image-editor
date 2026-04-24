@@ -11,8 +11,8 @@ from .utils import setup_logger
 
 logger = setup_logger(__name__)
 
-_DEFAULT_CONTROLNET = "diffusers/controlnet-canny-sdxl-1.0"
-_DEFAULT_BASE = "stabilityai/stable-diffusion-xl-base-1.0"
+_DEFAULT_CONTROLNET = "lllyasviel/sd-controlnet-canny"
+_DEFAULT_BASE = "Uminosachi/realisticVisionV51_v51VAE-inpainting"
 
 
 def extract_canny_edges(
@@ -55,7 +55,7 @@ def load_controlnet_pipeline(
     Returns:
         StableDiffusionXLControlNetInpaintPipeline.
     """
-    from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline
+    from diffusers import ControlNetModel, StableDiffusionControlNetInpaintPipeline
 
     dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
 
@@ -64,8 +64,8 @@ def load_controlnet_pipeline(
         controlnet_model_id, torch_dtype=dtype
     )
 
-    logger.info(f"Loading ControlNet+SDXL pipeline from '{base_model_id}' …")
-    pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
+    logger.info(f"Loading ControlNet+SD1.5 pipeline from '{base_model_id}' …")
+    pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
         base_model_id,
         controlnet=controlnet,
         torch_dtype=dtype,
@@ -119,13 +119,11 @@ def apply_controlnet(
     Returns:
         Generated PIL image at original resolution.
     """
-    strength = max(0.2, min(0.75, strength))  # allow up to 0.75 for visible edits
+    strength = max(0.2, min(0.99, strength))
     orig_size = image.size
 
     if target_size is None:
-        w = (orig_size[0] // 8) * 8
-        h = (orig_size[1] // 8) * 8
-        target_size = (w, h)
+        target_size = (512, 512)  # SD 1.5 native resolution
 
     resized_image = image.resize(target_size, Image.LANCZOS)
     resized_canny = canny_image.resize(target_size, Image.LANCZOS)

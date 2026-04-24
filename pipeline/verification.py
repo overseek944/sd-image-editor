@@ -84,7 +84,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 
 def load_clip_model(
-    model_id: str = "openai/clip-vit-base-patch32",
+    model_id: str = "openai/clip-vit-large-patch14",
     device: str = "cpu",
 ):
     """Load a CLIP model and its processor.

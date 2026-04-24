@@ -12,3 +12,4 @@ output/
 checkpoints/
 *.log
 .DS_Store
+a.txt

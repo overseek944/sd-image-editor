@@ -32,7 +32,13 @@ from PIL import Image
 from pipeline.compositing import blend_images, crop_for_inpaint, paste_inpaint_result
 from pipeline.controlnet import apply_controlnet, extract_canny_edges, load_controlnet_pipeline
 from pipeline.diffusion import load_inpaint_pipeline, run_inpainting
-from pipeline.segmentation import generate_mask, load_sam_model, process_mask
+from pipeline.segmentation import (
+    generate_grounded_mask,
+    generate_mask,
+    load_grounding_dino,
+    load_sam_model,
+    process_mask,
+)
 from pipeline.utils import get_device, load_image, save_image, setup_logger
 from pipeline.verification import (
     evaluate_similarity,
@@ -54,6 +60,8 @@ class _ModelCache:
     face_analyzer = None
     clip_model = None
     clip_processor = None
+    gdino_processor = None
+    gdino_model = None
 
 
 def _ensure_models(
@@ -67,6 +75,9 @@ def _ensure_models(
     face_providers: List[str],
     clip_model_id: str,
     load_clip: bool,
+    use_grounded_sam: bool = False,
+    gdino_model_id: str = "IDEA-Research/grounding-dino-base",
+    gdino_device: str = "cpu",
 ) -> None:
     """Lazy-load every model once and cache in _ModelCache."""
     if _ModelCache.sam is None:
@@ -86,6 +97,11 @@ def _ensure_models(
 
     if load_clip and _ModelCache.clip_model is None:
         _ModelCache.clip_model, _ModelCache.clip_processor = load_clip_model(clip_model_id)
+
+    if use_grounded_sam and _ModelCache.gdino_model is None:
+        _ModelCache.gdino_processor, _ModelCache.gdino_model = load_grounding_dino(
+            gdino_model_id, gdino_device
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +126,7 @@ def retry_logic(
     load_clip: bool,
     clip_device: str,
     use_crop_inpaint: bool = True,
+    inpaint_resolution: int = 512,
 ) -> Tuple[Optional[Image.Image], Dict, List[Dict]]:
     """Attempt inpainting up to `max_attempts` times, returning the first result
     that passes face-similarity, background-SSIM, AND minimum edit checks.
@@ -146,7 +163,7 @@ def retry_logic(
                 image=original,
                 mask=mask_processed,
                 padding_fraction=0.20,
-                target_size=(1024, 1024),
+                target_size=(inpaint_resolution, inpaint_resolution),
             )
             # Also crop the canny map to match the image crop
             diff_canny: Optional[Image.Image] = None
@@ -175,6 +192,7 @@ def retry_logic(
                 controlnet_conditioning_scale=current_cn_scale,
                 num_inference_steps=num_inference_steps,
                 seed=seed,
+                target_size=(inpaint_resolution, inpaint_resolution),
             )
         else:
             generated = run_inpainting(
@@ -281,14 +299,15 @@ def run_pipeline(
     dilation_iterations: int = 2,
     blur_kernel_size: int = 21,
     # --- Diffusion ---
-    inpaint_model_id: str = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+    inpaint_model_id: str = "Uminosachi/realisticVisionV51_v51VAE-inpainting",
     use_controlnet: bool = True,
-    controlnet_model_id: str = "diffusers/controlnet-canny-sdxl-1.0",
-    base_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0",
-    strength: float = 0.6,
+    controlnet_model_id: str = "lllyasviel/sd-controlnet-canny",
+    base_model_id: str = "Uminosachi/realisticVisionV51_v51VAE-inpainting",
+    strength: float = 0.75,
     guidance_scale: float = 9.0,
-    num_inference_steps: int = 30,
-    controlnet_conditioning_scale: float = 0.5,
+    num_inference_steps: int = 20,
+    controlnet_conditioning_scale: float = 0.4,
+    inpaint_resolution: int = 512,
     canny_low: int = 100,
     canny_high: int = 200,
     negative_prompt: str = (
@@ -298,15 +317,21 @@ def run_pipeline(
     # --- Verification ---
     face_similarity_threshold: float = 0.85,
     background_ssim_threshold: float = 0.80,
-    min_edit_threshold: float = 0.05,   # edit-region SSIM must drop by at least this much
+    min_edit_threshold: float = 0.03,   # edit-region SSIM must drop by at least this much
     face_providers: Optional[List[str]] = None,
     load_clip: bool = True,
-    clip_model_id: str = "openai/clip-vit-base-patch32",
+    clip_model_id: str = "openai/clip-vit-large-patch14",
     clip_device: str = "cpu",
     # --- Crop-and-inpaint ---
     use_crop_inpaint: bool = True,
     # --- Retry ---
     max_attempts: int = 3,
+    # --- Grounded-SAM (text-driven, no click needed) ---
+    grounded_text: Optional[str] = None,
+    gdino_model_id: str = "IDEA-Research/grounding-dino-base",
+    gdino_device: str = "cpu",
+    grounded_box_threshold: float = 0.3,
+    grounded_text_threshold: float = 0.25,
     # --- Device ---
     device: Optional[str] = None,
 ) -> Dict:
@@ -383,19 +408,35 @@ def run_pipeline(
         face_providers=face_providers,
         clip_model_id=clip_model_id,
         load_clip=load_clip,
+        use_grounded_sam=grounded_text is not None,
+        gdino_model_id=gdino_model_id,
+        gdino_device=gdino_device,
     )
 
     # 3. Generate mask
-    logger.info("[3/7] Generating SAM mask …")
-    raw_mask = generate_mask(
-        image=original,
-        sam_model=_ModelCache.sam,
-        point_coords=point_coords,
-        point_labels=point_labels,
-        box=box,
-        auto_select=auto_select,
-        auto_index=auto_mask_index,
-    )
+    if grounded_text is not None:
+        logger.info(f"[3/7] Generating Grounded-SAM mask for '{grounded_text}' …")
+        raw_mask = generate_grounded_mask(
+            image=original,
+            gdino_processor=_ModelCache.gdino_processor,
+            gdino_model=_ModelCache.gdino_model,
+            sam_model=_ModelCache.sam,
+            text_query=grounded_text,
+            box_threshold=grounded_box_threshold,
+            text_threshold=grounded_text_threshold,
+            device=gdino_device,
+        )
+    else:
+        logger.info("[3/7] Generating SAM mask …")
+        raw_mask = generate_mask(
+            image=original,
+            sam_model=_ModelCache.sam,
+            point_coords=point_coords,
+            point_labels=point_labels,
+            box=box,
+            auto_select=auto_select,
+            auto_index=auto_mask_index,
+        )
 
     # 4. Process mask
     logger.info("[4/7] Processing mask (dilation + blur) …")
@@ -434,6 +475,7 @@ def run_pipeline(
         load_clip=load_clip,
         clip_device=clip_device,
         use_crop_inpaint=use_crop_inpaint,
+        inpaint_resolution=inpaint_resolution,
     )
 
     # 7. Save output
@@ -501,6 +543,16 @@ def _parse_args():
     p.add_argument("--auto-select", action="store_true")
     p.add_argument("--auto-mask-index", type=int, default=0)
 
+    # Grounded-SAM
+    p.add_argument(
+        "--grounded-text", default=None,
+        help='Text-driven region selection, e.g. "hair" or "eyes". Replaces --point/--box.',
+    )
+    p.add_argument("--gdino-model", default="IDEA-Research/grounding-dino-tiny")
+    p.add_argument("--gdino-device", default="cpu")
+    p.add_argument("--grounded-box-threshold", type=float, default=0.3)
+    p.add_argument("--grounded-text-threshold", type=float, default=0.25)
+
     # Diffusion
     p.add_argument("--no-controlnet", action="store_true")
     p.add_argument("--no-crop-inpaint", action="store_true",
@@ -508,11 +560,15 @@ def _parse_args():
     p.add_argument("--strength", type=float, default=None,
                    help="Denoising strength. Defaults: 0.6 with ControlNet, 0.85 without.")
     p.add_argument("--guidance-scale", type=float, default=9.0)
-    p.add_argument("--steps", type=int, default=30)
+    p.add_argument("--steps", type=int, default=20)
+    p.add_argument("--resolution", type=int, default=512,
+                   help="Inpainting resolution (512 for SD 1.5, 1024 for SDXL).")
 
     # Verification
     p.add_argument("--face-threshold", type=float, default=0.85)
     p.add_argument("--bg-ssim-threshold", type=float, default=0.80)
+    p.add_argument("--min-edit-threshold", type=float, default=0.03,
+                   help="Minimum required edit (1 - SSIM drop). Lower = more lenient.")
     p.add_argument("--max-attempts", type=int, default=3)
     p.add_argument("--no-clip", action="store_true")
 
@@ -526,8 +582,8 @@ if __name__ == "__main__":
     args = _parse_args()
 
     use_controlnet = not args.no_controlnet
-    # Default strength: 0.85 for the dedicated inpaint model; 0.6 with ControlNet
-    strength = args.strength if args.strength is not None else (0.85 if not use_controlnet else 0.6)
+    # Default strength: 0.85 for the dedicated inpaint model; 0.75 with ControlNet
+    strength = args.strength if args.strength is not None else (0.85 if not use_controlnet else 0.75)
 
     result = run_pipeline(
         image_path=args.image,
@@ -544,11 +600,18 @@ if __name__ == "__main__":
         strength=strength,
         guidance_scale=args.guidance_scale,
         num_inference_steps=args.steps,
+        inpaint_resolution=args.resolution,
         face_similarity_threshold=args.face_threshold,
         background_ssim_threshold=args.bg_ssim_threshold,
+        min_edit_threshold=args.min_edit_threshold,
         max_attempts=args.max_attempts,
         load_clip=not args.no_clip,
         use_crop_inpaint=not args.no_crop_inpaint,
+        grounded_text=args.grounded_text,
+        gdino_model_id=args.gdino_model,
+        gdino_device=args.gdino_device,
+        grounded_box_threshold=args.grounded_box_threshold,
+        grounded_text_threshold=args.grounded_text_threshold,
         device=args.device,
     )
 
